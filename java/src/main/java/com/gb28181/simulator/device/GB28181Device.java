@@ -41,6 +41,9 @@ public class GB28181Device {
     // 会话跟踪：Call-ID -> [session_keys]
     private final Map<String, List<String>> callIdToSessions = new ConcurrentHashMap<>();
     
+    // 存储每个通道的临时目录
+    private final Map<String, String> tempDirs = new ConcurrentHashMap<>();
+    
     /**
      * 添加Call-ID到session_key的映射
      */
@@ -121,6 +124,210 @@ public class GB28181Device {
     }
     
     /**
+     * 获取系统字体路径，优先使用微软雅黑
+     */
+    private static String getFontPath() {
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        
+        if (osName.contains("windows")) {
+            // Windows系统：优先使用微软雅黑
+            String[] fontPaths = {
+                "C:\\Windows\\Fonts\\msyh.ttc",  // 微软雅黑
+                "C:\\Windows\\Fonts\\simhei.ttf",  // 黑体
+                "C:\\Windows\\Fonts\\simsun.ttc",  // 宋体
+            };
+            for (String path : fontPaths) {
+                java.io.File fontFile = new java.io.File(path);
+                if (fontFile.exists()) {
+                    return path;
+                }
+            }
+            // 如果找不到文件，使用字体名称
+            return "Microsoft YaHei";
+        } else if (osName.contains("mac")) {
+            // macOS系统字体
+            String[] fontPaths = {
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/STHeiti Light.ttc",
+                "/Library/Fonts/Arial Unicode.ttf",
+            };
+            for (String path : fontPaths) {
+                java.io.File fontFile = new java.io.File(path);
+                if (fontFile.exists()) {
+                    return path;
+                }
+            }
+            return "PingFang SC";
+        } else {
+            // Linux系统字体
+            String[] fontPaths = {
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            };
+            for (String path : fontPaths) {
+                java.io.File fontFile = new java.io.File(path);
+                if (fontFile.exists()) {
+                    return path;
+                }
+            }
+            return "DejaVu Sans";
+        }
+    }
+    
+    /**
+     * 获取视频信息（分辨率、帧率等）
+     */
+    private VideoInfo getVideoInfo(String videoPath) {
+        try {
+            List<String> cmd = Arrays.asList(
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,r_frame_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                videoPath
+            );
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            
+            StringBuilder output = new StringBuilder();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            }
+            
+            int exitCode = process.waitFor();
+            if (exitCode == 0) {
+                String[] lines = output.toString().trim().split("\n");
+                if (lines.length >= 3) {
+                    int width = Integer.parseInt(lines[0].trim());
+                    int height = Integer.parseInt(lines[1].trim());
+                    String frameRate = lines[2].trim();
+                    return new VideoInfo(width, height, frameRate);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("⚠ 无法获取视频信息 " + videoPath + ": " + e.getMessage());
+        }
+        return new VideoInfo(1920, 1080, "25/1");
+    }
+    
+    /**
+     * 视频信息类
+     */
+    private static class VideoInfo {
+        final int width;
+        final int height;
+        final String frameRate;
+        
+        VideoInfo(int width, int height, String frameRate) {
+            this.width = width;
+            this.height = height;
+            this.frameRate = frameRate;
+        }
+    }
+    
+    /**
+     * 创建带水印的过渡视频
+     */
+    private boolean createWatermarkVideo(String outputPath, String text, int duration,
+                                         int width, int height, String frameRate) {
+        String escapedText = text.replace("'", "\\'");
+        String font = getFontPath();
+        
+        String filterStr;
+        java.io.File fontFile = new java.io.File(font);
+        if (fontFile.exists() || font.startsWith("/") || font.contains(":\\")) {
+            filterStr = String.format(
+                "drawtext=fontfile=%s:text='%s':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=8:x=(w-text_w)/2:y=(h-text_h)/2",
+                font, escapedText
+            );
+        } else {
+            filterStr = String.format(
+                "drawtext=font=%s:text='%s':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=8:x=(w-text_w)/2:y=(h-text_h)/2",
+                font, escapedText
+            );
+        }
+        
+        List<String> cmd = Arrays.asList(
+            "ffmpeg",
+            "-f", "lavfi",
+            "-i", String.format("color=c=black:s=%dx%d:d=%d:r=%s", width, height, duration, frameRate),
+            "-vf", filterStr,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-y",
+            outputPath
+        );
+        
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+            return exitCode == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+    
+    /**
+     * 创建包含视频和水印过渡的播放列表
+     */
+    private String createPlaylistWithWatermarks(List<String> videoFiles, String tempDir, 
+                                                String channelId, int duration) {
+        String playlistPath = tempDir + java.io.File.separator + "playlist.txt";
+        
+        // 获取第一个视频的信息作为参考
+        VideoInfo videoInfo;
+        if (!videoFiles.isEmpty()) {
+            videoInfo = getVideoInfo(videoFiles.get(0));
+        } else {
+            videoInfo = new VideoInfo(1920, 1080, "25/1");
+        }
+        
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(
+                new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(playlistPath), 
+                    java.nio.charset.StandardCharsets.UTF_8))) {
+            
+            for (int i = 0; i < videoFiles.size(); i++) {
+                String videoFile = videoFiles.get(i);
+                // 添加视频文件
+                java.io.File file = new java.io.File(videoFile);
+                String absPath = file.getAbsolutePath().replace("'", "'\\''");
+                writer.println("file '" + absPath + "'");
+                
+                // 创建下一个文件的水印过渡
+                int nextIndex = (i + 1) % videoFiles.size();
+                String nextFilename = new java.io.File(videoFiles.get(nextIndex)).getName();
+                String watermarkText = "播放下一个 " + nextFilename;
+                
+                String watermarkPath = tempDir + java.io.File.separator + "watermark_" + i + ".mp4";
+                
+                if (createWatermarkVideo(watermarkPath, watermarkText, duration,
+                        videoInfo.width, videoInfo.height, videoInfo.frameRate)) {
+                    java.io.File watermarkFile = new java.io.File(watermarkPath);
+                    String absWatermarkPath = watermarkFile.getAbsolutePath().replace("'", "'\\''");
+                    writer.println("file '" + absWatermarkPath + "'");
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("✗ 创建播放列表失败: " + e.getMessage());
+            return null;
+        }
+        
+        return playlistPath;
+    }
+    
+    /**
      * 启动视频流推送
      */
     public boolean startStreamPush(String channelId, String avcaptureUrl, String targetIp,
@@ -131,20 +338,127 @@ public class GB28181Device {
         // 停止该会话的旧推流
         stopStreamPushBySessionKey(sessionKey);
         
+        // 收集resources目录下的所有mp4文件
+        List<String> files = new ArrayList<>();
+        java.io.File resourcesDir = null;
+        
+        // 基于类文件位置计算resources目录路径
+        try {
+            java.net.URL classUrl = this.getClass().getProtectionDomain()
+                .getCodeSource().getLocation();
+            if (classUrl != null && "file".equals(classUrl.getProtocol())) {
+                java.io.File classFile = new java.io.File(classUrl.toURI());
+                java.io.File baseDir;
+                
+                if (classFile.isFile() && classFile.getName().endsWith(".jar")) {
+                    // JAR文件：在JAR所在目录的父目录查找java/src/main/resources
+                    baseDir = classFile.getParentFile();
+                    if (baseDir != null && baseDir.getParentFile() != null) {
+                        java.io.File javaDir = baseDir.getParentFile();
+                        resourcesDir = new java.io.File(javaDir, "src/main/resources");
+                    }
+                } else {
+                    // 找到java目录，然后定位到src/main/resources
+                    baseDir = classFile.getParentFile();
+                    for (int i = 0; i < 3 && baseDir != null; i++) {
+                        baseDir = baseDir.getParentFile();
+                    }
+                    if (baseDir != null && baseDir.exists()) {
+                        resourcesDir = new java.io.File(baseDir, "src/main/resources");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 忽略异常，继续尝试其他方法
+        }
+        
+        // 如果还是找不到，使用当前工作目录
+        if (resourcesDir == null || !resourcesDir.exists()) {
+            java.io.File currentDir = new java.io.File(System.getProperty("user.dir"));
+            int maxLevels = 5;
+            for (int level = 0; level < maxLevels && currentDir != null; level++) {
+                java.io.File testResourcesDir = new java.io.File(currentDir, "java/src/main/resources");
+                if (testResourcesDir.exists()) {
+                    resourcesDir = testResourcesDir;
+                    break;
+                }
+                java.io.File parentDir = currentDir.getParentFile();
+                if (parentDir == null || parentDir.equals(currentDir)) {
+                    break;
+                }
+                currentDir = parentDir;
+            }
+        }
+        
+        // 从resources目录查找mp4文件
+        if (resourcesDir != null && resourcesDir.exists()) {
+            java.io.File[] mp4Files = resourcesDir.listFiles((dir, name) -> 
+                name.toLowerCase().endsWith(".mp4"));
+            if (mp4Files != null) {
+                for (java.io.File file : mp4Files) {
+                    if (file.isFile()) {
+                        files.add(file.getAbsolutePath());
+                    }
+                }
+                // 排序以确保顺序一致
+                files.sort(String::compareTo);
+            }
+        }
+        
+        // 环境变量指定的文件也纳入（若存在）
+        if (avcaptureUrl != null && new java.io.File(avcaptureUrl).exists() && 
+            !files.contains(avcaptureUrl)) {
+            files.add(0, avcaptureUrl);
+        }
+        
+        if (files.isEmpty()) {
+            System.err.println("✗ 未找到可用的本地MP4文件，请放置到 " + 
+                (resourcesDir != null ? resourcesDir.getAbsolutePath() : "resources") + " 目录");
+            return false;
+        }
+        
         String rtpUrl = "rtp://" + targetIp + ":" + targetPort;
         
-        System.out.println("\n推流: 循环播放 -> " + rtpUrl + " (SSRC: " + ssrc + ", 通道: " + channelId + ")");
+        // 创建临时目录用于存放水印视频和播放列表
+        String tempDir;
+        try {
+            java.io.File tempFile = java.io.File.createTempFile("gb28181_playlist_" + deviceId + "_" + channelId + "_", "");
+            tempFile.delete();
+            tempFile.mkdirs();
+            tempDir = tempFile.getAbsolutePath();
+        } catch (IOException e) {
+            System.err.println("✗ 创建临时目录失败: " + e.getMessage());
+            return false;
+        }
+        
+        // 保存临时目录，以便后续清理
+        tempDirs.put(sessionKey, tempDir);
+        
+        // 创建包含水印过渡的播放列表
+        String playlistPath = createPlaylistWithWatermarks(files, tempDir, channelId, 5);
+        
+        if (playlistPath == null) {
+            System.err.println("✗ 创建播放列表失败");
+            return false;
+        }
+        
+        System.out.println("\n推流: 循环 " + files.size() + " 个文件（含水印过渡） -> " + 
+            rtpUrl + " (SSRC: " + ssrc + ", 通道: " + channelId + ")");
         
         try {
-            // 构建FFmpeg命令（包含循环播放、音频编码等）
+            // 构建FFmpeg命令
             List<String> cmd = new ArrayList<>();
             cmd.add("ffmpeg");
             // 循环播放参数：-stream_loop -1 表示无限循环，-re 表示实时速率读取
             cmd.add("-stream_loop");
             cmd.add("-1");
             cmd.add("-re");
+            cmd.add("-f");
+            cmd.add("concat");
+            cmd.add("-safe");
+            cmd.add("0");
             cmd.add("-i");
-            cmd.add(avcaptureUrl);
+            cmd.add(playlistPath);
             
             // 查找通道名称（用于水印）
             String channelName = channelId;
@@ -162,14 +476,29 @@ public class GB28181Device {
             }
             
             // 构建drawtext水印滤镜（优先中文名，无则用ID）
-            // 参考Python版本的实现，使用NotoSansCJK字体支持中文
             String watermark = channelName;
-            // 转义单引号（Python版本在f-string中会自动处理，Java需要手动转义）
+            // 转义单引号
             String escapedWatermark = watermark.replace("'", "\\'");
-            String filterStr = String.format(
-                "drawtext=fontfile=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc:text='%s':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10",
-                escapedWatermark
-            );
+            
+            // 获取字体路径
+            String font = getFontPath();
+            
+            // 构建 drawtext 滤镜
+            String filterStr;
+            java.io.File fontFile = new java.io.File(font);
+            if (fontFile.exists() || font.startsWith("/") || font.contains(":\\")) {
+                // 使用字体文件路径
+                filterStr = String.format(
+                    "drawtext=fontfile=%s:text='%s':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10",
+                    font, escapedWatermark
+                );
+            } else {
+                // 使用字体名称
+                filterStr = String.format(
+                    "drawtext=font=%s:text='%s':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10",
+                    font, escapedWatermark
+                );
+            }
             cmd.add("-vf");
             cmd.add(filterStr);
             
@@ -224,6 +553,19 @@ public class GB28181Device {
      * 按session key停止推流
      */
     private void stopStreamPushBySessionKey(String sessionKey) {
+        // 清理临时目录
+        String tempDir = tempDirs.remove(sessionKey);
+        if (tempDir != null) {
+            try {
+                java.nio.file.Files.walk(java.nio.file.Paths.get(tempDir))
+                    .sorted(java.util.Comparator.reverseOrder())
+                    .map(java.nio.file.Path::toFile)
+                    .forEach(java.io.File::delete);
+            } catch (Exception e) {
+                // 忽略清理错误
+            }
+        }
+        
         Process process = channelIdToProcess.remove(sessionKey);
         if (process != null && process.isAlive()) {
             process.destroy();

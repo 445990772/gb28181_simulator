@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>设备详情 - GB28181 设备模拟器</title>
+    <link rel="stylesheet" href="static/style.css">
+    <link rel="stylesheet" href="static/device-detail.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container detail-container">
+        <header class="detail-header">
+            <div class="header-left">
+                <button class="btn btn-secondary" id="backBtn">← 返回</button>
+                <h1 id="deviceTitle">设备详情</h1>
+            </div>
+            <div class="header-right">
+                <div class="device-status" id="deviceStatus">
+                    <span class="status-badge" id="statusBadge">加载中...</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="detail-content">
+            <!-- 上方：流量统计区 -->
+            <div class="stats-panel">
+                <div class="panel-header">
+                    <h2>📈 流量统计</h2>
+                    <div class="stats-controls">
+                        <select id="statsChannelFilter" class="channel-selector">
+                            <option value="all">所有通道</option>
+                        </select>
+                        <button class="btn btn-small" id="pauseStatsBtn">暂停</button>
+                        <button class="btn btn-small" id="resumeStatsBtn" style="display: none;">恢复</button>
+                        <button class="btn btn-small" id="clearStatsBtn">清空</button>
+                    </div>
+                </div>
+                <div class="chart-container-wrapper">
+                    <canvas id="trafficChart"></canvas>
+                </div>
+                <div class="channel-legend" id="channelLegend"></div>
+            </div>
+
+            <!-- 下方：消息收发区 -->
+            <div class="message-panel">
+                <div class="panel-header">
+                    <h2>📨 数据收发</h2>
+                    <div class="message-controls">
+                        <select id="channelFilter" class="channel-selector">
+                            <option value="all">所有通道</option>
+                        </select>
+                        <label>
+                            <input type="checkbox" id="autoScrollMessages" checked> 自动滚动
+                        </label>
+                        <button class="btn btn-small" id="clearMessagesBtn">清空</button>
+                    </div>
+                </div>
+                <div class="im-message-container" id="imMessageContainer">
+                    <div class="message-placeholder">等待消息...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="static/device-detail.js"></script>
+</body>
+</html>
+

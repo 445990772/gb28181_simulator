@@ -13,6 +13,13 @@ gb28181_simulator/
 ├── java/                             # Java版本
 │   ├── pom.xml                       # Maven配置
 │   └── src/main/java/                # Java源代码
+├── web/                              # Web界面
+│   ├── index.html                    # Web前端页面
+│   ├── static/                       # 静态资源
+│   │   ├── style.css                 # 样式文件
+│   │   └── app.js                    # JavaScript文件
+│   ├── api_python.py                 # Python后端API服务
+│   └── ...                           # Java后端API服务在java/src/main/java/com/gb28181/simulator/web/
 └── README.md                         # 本文件
 ```
 
@@ -167,3 +174,149 @@ java -cp target/simulator-1.0.0-jar-with-dependencies.jar \
      - 或者修改代码中的字体路径指向您下载的字体文件位置
 
 6. **并发限制**：压力测试时，并发线程数不要设置过大，避免对服务器造成过大压力
+
+---
+
+## 🌐 Web配置界面
+
+为了方便不熟悉命令行的用户使用，项目提供了Web配置界面，支持Python和Java两种后端服务。
+
+### 功能特性
+
+- 📱 可视化配置界面，无需命令行操作
+- 🔄 支持Python和Java两种后端服务切换
+- 📊 实时查看设备状态和运行日志
+- ⚙️ 完整的参数配置选项
+- 🎨 现代化的用户界面设计
+
+### Python版本Web服务
+
+#### 安装依赖
+
+```bash
+cd python
+pip install -r requirements.txt
+```
+
+#### 启动Web服务
+
+```bash
+cd web
+python3 api_python.py
+```
+
+或者从项目根目录启动：
+
+```bash
+python3 web/api_python.py
+```
+
+服务启动后，在浏览器中访问：`http://localhost:5000`
+
+**启动成功后会看到：**
+```
+============================================================
+GB28181 设备模拟器 - Python API服务
+============================================================
+API服务地址: http://localhost:5000
+Web界面地址: http://localhost:5000/
+============================================================
+```
+
+### Java版本Web服务
+
+#### 编译项目
+
+```bash
+cd java
+mvn clean package
+```
+
+#### 启动Web服务
+
+```bash
+cd java
+java -cp target/simulator-1.0.0-jar-with-dependencies.jar \
+     com.gb28181.simulator.web.ApiServer
+```
+
+或者指定端口：
+
+```bash
+java -cp target/simulator-1.0.0-jar-with-dependencies.jar \
+     com.gb28181.simulator.web.ApiServer 8080
+```
+
+服务启动后，在浏览器中访问：`http://localhost:8080`
+
+**启动成功后会看到：**
+```
+============================================================
+GB28181 设备模拟器 - Java API服务
+============================================================
+API服务地址: http://localhost:8080
+Web界面地址: http://localhost:8080/index.html
+============================================================
+按 Ctrl+C 停止服务
+```
+
+### Web界面使用说明
+
+1. **选择后端服务**：在页面顶部选择Python或Java后端服务
+2. **检查连接**：点击"检查后端连接"按钮，确认后端服务正常运行
+3. **配置参数**：
+   - GB28181平台服务器IP和端口
+   - 设备密码
+   - 设备数量和每设备通道数
+   - 设备ID前缀和起始端口
+4. **启动模拟器**：点击"启动模拟器"按钮
+5. **查看状态**：点击"查看状态"按钮查看设备运行状态
+6. **停止模拟器**：点击"停止模拟器"按钮停止所有设备
+
+### API接口说明
+
+Web界面通过RESTful API与后端服务通信：
+
+- `GET /api/health` - 健康检查
+- `POST /api/start` - 启动模拟器
+- `POST /api/stop` - 停止模拟器
+- `GET /api/status` - 获取运行状态
+
+### 快速启动
+
+#### Python版本一键启动
+
+**Linux/macOS:**
+```bash
+cd python && pip3 install -r requirements.txt && cd ../web && python3 api_python.py
+```
+
+**Windows:**
+```cmd
+cd python && pip3 install -r requirements.txt && cd ..\web && python api_python.py
+```
+
+#### Java版本一键启动
+
+**Linux/macOS:**
+```bash
+cd java && mvn clean package && java -cp target/simulator-1.0.0-jar-with-dependencies.jar com.gb28181.simulator.web.ApiServer
+```
+
+**Windows:**
+```cmd
+cd java && mvn clean package && java -cp target/simulator-1.0.0-jar-with-dependencies.jar com.gb28181.simulator.web.ApiServer
+```
+
+### 注意事项
+
+1. **端口占用**：确保5000端口（Python）或8080端口（Java）未被占用
+2. **后端服务**：Web界面需要对应的后端服务（Python或Java）正在运行
+3. **跨域访问**：如果从其他机器访问，需要修改后端服务的host配置
+4. **防火墙**：确保防火墙允许访问Web服务端口
+5. **MP4文件**：确保在 `python/resources/` 或 `java/src/main/resources/` 目录下有mp4文件用于推流
+6. **FFmpeg**：确保系统已安装FFmpeg并配置到PATH环境变量
+
+### 详细启动说明
+
+更多详细的启动说明和故障排除，请参考：`web/启动说明.md`

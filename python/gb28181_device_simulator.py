@@ -18,6 +18,46 @@ import signal
 import os
 import atexit
 import tempfile
+import platform
+
+def get_font_path():
+    """获取系统字体路径，优先使用微软雅黑"""
+    system = platform.system()
+    
+    if system == "Windows":
+        # Windows系统：优先使用微软雅黑
+        font_paths = [
+            r"C:\Windows\Fonts\msyh.ttc",  # 微软雅黑
+            r"C:\Windows\Fonts\simhei.ttf",  # 黑体
+            r"C:\Windows\Fonts\simsun.ttc",  # 宋体
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                return path
+        # 如果找不到文件，使用字体名称
+        return "Microsoft YaHei"
+    elif system == "Darwin":  # macOS
+        # macOS系统字体
+        font_paths = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                return path
+        return "PingFang SC"
+    else:  # Linux
+        # Linux系统字体
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                return path
+        return "DejaVu Sans"
 
 class GB28181Device:
     """GB28181设备类"""
@@ -50,6 +90,7 @@ class GB28181Device:
         # 会话跟踪：Call-ID -> [session_keys]
         self.callid_to_sessions = {}
         self.playlist_path = None
+        self.temp_dirs = {}  # 存储每个通道的临时目录
 
     def _start_udp_relay(self, channel_id: str, target_ip: str, target_port: int) -> int:
         """启动本地UDP中继（按通道），返回本地监听端口"""
@@ -89,14 +130,7 @@ class GB28181Device:
                         pass
                 # 每秒打印一次带宽
                 now = time.time()
-                # 空闲超时自动停流（平台可能未发BYE），默认15秒
-                if now - state['last_recv'] > 15:
-                    print(f"  通道空闲超时，自动停止: {channel_id}")
-                    try:
-                        self.stop_stream_push(channel_id)
-                    except Exception:
-                        pass
-                    break
+                # 注意：不再因为空闲超时而停止推流，推流应该持续进行直到收到BYE消息
                 if now - state['last_ts'] >= 1.0:
                     mbps = state['bytes_in_second'] / (1024 * 1024)
                     COLOR_DARK_GREEN = '\033[2;32m'  # 深灰绿色
@@ -232,61 +266,148 @@ Content-Length: 0
         
         return result
     
+    def _get_video_info(self, video_path):
+        """获取视频信息（分辨率、帧率等）"""
+        try:
+            cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height,r_frame_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            lines = result.stdout.strip().split('\n')
+            width = int(lines[0])
+            height = int(lines[1])
+            frame_rate = lines[2]
+            return width, height, frame_rate
+        except Exception as e:
+            print(f"⚠ 无法获取视频信息 {video_path}: {e}，使用默认值")
+            return 1920, 1080, "25/1"
+    
+    def _create_watermark_video(self, output_path, text, duration=5, width=1920, height=1080, frame_rate="25/1"):
+        """创建带水印的过渡视频"""
+        escaped_text = text.replace("'", "\\'")
+        font = get_font_path()
+        
+        if os.path.exists(font) or font.startswith("/") or (platform.system() == "Windows" and ":" in font):
+            filter_str = (
+                f"drawtext=fontfile={font}:"
+                f"text='{escaped_text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:"
+                f"boxborderw=8:x=(w-text_w)/2:y=(h-text_h)/2"
+            )
+        else:
+            filter_str = (
+                f"drawtext=font={font}:"
+                f"text='{escaped_text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:"
+                f"boxborderw=8:x=(w-text_w)/2:y=(h-text_h)/2"
+            )
+        
+        cmd = [
+            'ffmpeg',
+            '-f', 'lavfi',
+            '-i', f'color=c=black:s={width}x{height}:d={duration}:r={frame_rate}',
+            '-vf', filter_str,
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-pix_fmt', 'yuv420p',
+            '-y',
+            output_path
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _create_playlist_with_watermarks(self, video_files, temp_dir, channel_id, duration=5):
+        """创建包含视频和水印过渡的播放列表"""
+        playlist_path = os.path.join(temp_dir, 'playlist.txt')
+        
+        # 获取第一个视频的信息作为参考
+        if video_files:
+            width, height, frame_rate = self._get_video_info(video_files[0])
+        else:
+            width, height, frame_rate = 1920, 1080, "25/1"
+        
+        with open(playlist_path, 'w', encoding='utf-8') as f:
+            for i, video_file in enumerate(video_files):
+                # 添加视频文件
+                abs_path = os.path.abspath(video_file).replace("'", "'\\''")
+                f.write(f"file '{abs_path}'\n")
+                
+                # 创建下一个文件的水印过渡
+                next_index = (i + 1) % len(video_files)
+                next_filename = os.path.basename(video_files[next_index])
+                watermark_text = f"播放下一个 {next_filename}"
+                
+                watermark_path = os.path.join(temp_dir, f'watermark_{i}.mp4')
+                
+                if self._create_watermark_video(watermark_path, watermark_text, duration=duration,
+                                               width=width, height=height, frame_rate=frame_rate):
+                    abs_watermark_path = os.path.abspath(watermark_path).replace("'", "'\\''")
+                    f.write(f"file '{abs_watermark_path}'\n")
+        
+        return playlist_path
+    
     def start_stream_push(self, avcapture_url, target_ip, target_port, ssrc, channel_id):
         """启动FFmpeg推流到指定地址（仅允许本地文件作为输入）"""
         # 使用会话键（同通道不同端口可并发）：channel@ip:port
         session_key = f"{channel_id}@{target_ip}:{target_port}"
         
-        # 收集目录下的所有mp4文件，循环播放
-        search_dirs = [
-            os.path.dirname(__file__),
-            os.path.dirname(os.path.dirname(__file__)),
-        ]
+        # 收集resources目录下的所有mp4文件，循环播放
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        resources_dir = os.path.join(script_dir, 'resources')
         files = []
-        for d in search_dirs:
+        
+        # 从resources目录查找mp4文件
+        if os.path.exists(resources_dir):
             try:
-                for name in os.listdir(d):
+                for name in os.listdir(resources_dir):
                     if name.lower().endswith('.mp4'):
-                        p = os.path.join(d, name)
+                        p = os.path.join(resources_dir, name)
                         if os.path.isfile(p):
                             files.append(p)
             except Exception:
                 pass
+        
         # 环境变量指定的文件也纳入（若存在）
         if avcapture_url and os.path.isfile(avcapture_url) and avcapture_url not in files:
             files.insert(0, avcapture_url)
         
         if not files:
-            print(f"✗ 未找到可用的本地MP4文件，请放置到项目或 gb28181_simulator 目录")
+            print(f"✗ 未找到可用的本地MP4文件，请放置到 {resources_dir} 目录")
             return False
 
         # 使用本地UDP中继统计带宽：FFmpeg 推到本地端口，由中继转发到目标
         relay_port = self._start_udp_relay(session_key, target_ip, target_port)
         rtp_url = f"rtp://127.0.0.1:{relay_port}"
         
-        print(f"\n推流: 循环 {len(files)} 个文件 -> {rtp_url} (SSRC: {ssrc}, 通道: {channel_id})")
+        # 创建临时目录用于存放水印视频和播放列表
+        temp_dir = tempfile.mkdtemp(prefix=f'gb28181_playlist_{self.device_id}_{channel_id}_')
+        
+        # 保存临时目录，以便后续清理
+        self.temp_dirs[session_key] = temp_dir
+        
+        # 创建包含水印过渡的播放列表
+        playlist_path = self._create_playlist_with_watermarks(files, temp_dir, channel_id)
+        
+        if not playlist_path:
+            print(f"✗ 创建播放列表失败")
+            return False
+        
+        print(f"\n推流: 循环 {len(files)} 个文件（含水印过渡） -> {rtp_url} (SSRC: {ssrc}, 通道: {channel_id})")
         
         # 构建FFmpeg命令
         # GB28181通常使用MPEG-TS over RTP推流
         # SSRC在RTP协议层设置，FFmpeg的rtp_mpegts输出会处理
         # 本地文件无限循环推送，并使用 -re 以实时速率读取
-        if len(files) == 1:
-            input_args = ['-stream_loop', '-1', '-re', '-i', files[0]]
-        else:
-            # 生成临时播放列表
-            try:
-                if self.playlist_path and os.path.exists(self.playlist_path):
-                    os.remove(self.playlist_path)
-            except Exception:
-                pass
-            self.playlist_path = os.path.join(tempfile.gettempdir(), f"gb28181_playlist_{self.device_id}.txt")
-            with open(self.playlist_path, 'w') as f:
-                for p in files:
-                    f.write(f"file '{p}'\n")
-            input_args = ['-stream_loop', '-1', '-re', '-f', 'concat', '-safe', '0', '-i', self.playlist_path]
+        input_args = ['-stream_loop', '-1', '-re', '-f', 'concat', '-safe', '0', '-i', playlist_path]
 
-        # 构建drawtext水印滤镜（通道ID名）
-       # 构建drawtext水印滤镜（优先中文名，无则用ID）
+        # 构建drawtext水印滤镜（优先中文名，无则用ID）
         watermark = None
         for c in self.channels:
             if c.get('id') == channel_id and c.get('name'):
@@ -294,10 +415,24 @@ Content-Length: 0
                 break
         if not watermark:
             watermark = channel_id if channel_id else "CHANNEL"
-        filter_str = (
-            "drawtext=fontfile=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc:"
-            f"text='{watermark}':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10"
-        )
+        
+        # 获取字体路径
+        font = get_font_path()
+        escaped_watermark = watermark.replace("'", "\\'")
+        
+        # 构建 drawtext 滤镜
+        if os.path.exists(font) or font.startswith("/") or (platform.system() == "Windows" and ":" in font):
+            # 使用字体文件路径
+            filter_str = (
+                f"drawtext=fontfile={font}:"
+                f"text='{escaped_watermark}':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10"
+            )
+        else:
+            # 使用字体名称
+            filter_str = (
+                f"drawtext=font={font}:"
+                f"text='{escaped_watermark}':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=6:x=10:y=10"
+            )
         cmd = [
             'ffmpeg',
             *input_args,
@@ -338,6 +473,17 @@ Content-Length: 0
             for k in keys:
                 self.stop_stream_push(k)
             return
+        
+        # 清理临时目录
+        if channel_id in self.temp_dirs:
+            temp_dir = self.temp_dirs[channel_id]
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                del self.temp_dirs[channel_id]
+            except Exception:
+                pass
+        
         proc = self.channel_id_to_process.get(channel_id)
         # 如果没有精确的session key，按通道前缀匹配全部会话
         if not proc:
@@ -539,9 +685,16 @@ class GB28181DeviceSimulator:
             # 处理不同类型的消息
             if first_line.startswith('SIP/2.0'):
                 # 响应消息
-                if '200 OK' in first_line and 'REGISTER' in '\r\n'.join(lines):
-                    device.is_registered = True
-                    device.last_heartbeat = time.time()
+                if '200 OK' in first_line:
+                    # 检查是否是REGISTER响应
+                    if 'REGISTER' in '\r\n'.join(lines):
+                        device.is_registered = True
+                        device.last_heartbeat = time.time()
+                    # 检查是否是MESSAGE响应（心跳回复）
+                    elif 'MESSAGE' in '\r\n'.join(lines):
+                        # 收到心跳回复，确认设备已注册
+                        device.is_registered = True
+                        device.last_heartbeat = time.time()
                 elif '401 Unauthorized' in first_line:
                     device.is_registered = False
                     
@@ -594,39 +747,19 @@ class GB28181DeviceSimulator:
                     # 打印发送的响应
                     self.print_sip_message(device.device_id, "send", response, addr)
                     
-                    # 查找test.mp4文件：优先在python目录，然后项目根目录，最后向上查找
+                    # 查找test.mp4文件：从resources目录查找
                     script_dir = os.path.dirname(os.path.abspath(__file__))  # python目录
-                    project_root = os.path.dirname(script_dir)  # 项目根目录
-                    
-                    # 多个可能的查找位置（按优先级）
-                    search_paths = [
-                        os.path.join(script_dir, 'test.mp4'),        # python/test.mp4 (优先)
-                        os.path.join(project_root, 'test.mp4'),      # 项目根目录/test.mp4
-                    ]
-                    
-                    # 从当前工作目录开始，向上查找test.mp4文件
-                    current_dir = os.getcwd()
-                    max_levels = 5  # 最多向上查找5层
-                    for level in range(max_levels):
-                        search_paths.append(os.path.join(current_dir, 'test.mp4'))
-                        parent_dir = os.path.dirname(current_dir)
-                        if parent_dir == current_dir:  # 已经到达根目录
-                            break
-                        current_dir = parent_dir
+                    resources_dir = os.path.join(script_dir, 'resources')
+                    test_mp4_path = os.path.join(resources_dir, 'test.mp4')
                     
                     avcapture_url = None
-                    for test_path in search_paths:
-                        if os.path.isfile(test_path):
-                            avcapture_url = test_path
-                            print(f"  使用test.mp4文件: {avcapture_url}")
-                            break
-                    
-                    if avcapture_url is None:
+                    if os.path.isfile(test_mp4_path):
+                        avcapture_url = test_mp4_path
+                        print(f"  使用test.mp4文件: {avcapture_url}")
+                    else:
                         print(f"  错误: 未找到test.mp4文件")
-                        print(f"  已查找的位置:")
-                        for path in search_paths[:5]:  # 显示前5个主要位置
-                            status = "✓" if os.path.isfile(path) else "✗"
-                            print(f"    {status} {path}")
+                        print(f"  查找位置: {test_mp4_path}")
+                        print(f"  提示: 请将test.mp4文件放置到 {resources_dir} 目录")
                     
                     # 提取通道ID（从INVITE的To或Request-URI中）
                     channel_id = self.extract_channel_id(first_line)
@@ -874,11 +1007,26 @@ Content-Length: {content_length}
             contact_ip_used = device.contact_ip if device.contact_ip else device.local_ip
             # 精简注册日志：不打印注册细节
             
-            device.socket.sendto(register_request.encode('utf-8'), (device.server_ip, device.server_port))
+            try:
+                device.socket.sendto(register_request.encode('utf-8'), (device.server_ip, device.server_port))
+                # 发送成功，记录时间
+                last_register = time.time()
+            except (OSError, socket.error) as e:
+                import errno
+                error_msg = str(e)
+                error_code = e.errno if hasattr(e, 'errno') else None
+                if error_code == errno.ENETDOWN or "Host is down" in error_msg:
+                    print(f"⚠ 设备 {device.device_id} 网络接口不可用，等待重试...")
+                elif error_code == errno.ENETUNREACH or "Network is unreachable" in error_msg:
+                    print(f"⚠ 设备 {device.device_id} 网络不可达，检查服务器地址: {device.server_ip}:{device.server_port}")
+                else:
+                    print(f"⚠ 设备 {device.device_id} 发送注册请求失败: {e}")
+                # 继续运行，在超时循环中会重试
+                # 设置一个较早的时间，以便尽快重试
+                last_register = time.time() - device.retry_interval
             
             # 不打印注册请求
             
-            last_register = time.time()
             device.last_heartbeat = time.time()  # 初始化心跳计时器
             
             while self.running:
@@ -903,10 +1051,23 @@ Content-Length: {content_length}
                     if not device.is_registered or (current_time - last_register) >= device.register_expires:
                         # 确保满足重试间隔（10秒）
                         if (current_time - last_register) >= device.retry_interval:
-                            register_request = device.create_register_request()
-                            device.socket.sendto(register_request.encode('utf-8'), (device.server_ip, device.server_port))
-                            # 不打印重注册
-                            last_register = current_time
+                            try:
+                                register_request = device.create_register_request()
+                                device.socket.sendto(register_request.encode('utf-8'), (device.server_ip, device.server_port))
+                                # 不打印重注册
+                                last_register = current_time
+                            except (OSError, socket.error) as e:
+                                import errno
+                                error_code = e.errno if hasattr(e, 'errno') else None
+                                if error_code == errno.ENETDOWN or "Host is down" in str(e):
+                                    # 网络接口不可用，等待下次重试
+                                    pass
+                                elif error_code == errno.ENETUNREACH or "Network is unreachable" in str(e):
+                                    # 网络不可达，等待下次重试
+                                    pass
+                                else:
+                                    print(f"⚠ 设备 {device.device_id} 重注册失败: {e}")
+                                # 不更新 last_register，以便下次超时后重试
                 
                 except Exception as e:
                     if self.running:

@@ -12,13 +12,23 @@ import java.nio.charset.StandardCharsets;
 public class RegisterHandler {
     
     /**
-     * 处理注册响应
+     * 处理注册响应和心跳回复
      */
     public static void handleRegisterResponse(GB28181Device device, String[] lines) {
         String firstLine = lines[0];
         if (firstLine.contains("200 OK")) {
-            device.isRegistered = true;
-            device.lastHeartbeat = System.currentTimeMillis() / 1000;
+            // 检查是否是REGISTER响应
+            String allLines = String.join("\r\n", lines);
+            if (allLines.contains("REGISTER")) {
+                device.isRegistered = true;
+                device.lastHeartbeat = System.currentTimeMillis() / 1000;
+            } 
+            // 检查是否是MESSAGE响应（心跳回复）
+            else if (allLines.contains("MESSAGE")) {
+                // 收到心跳回复，确认设备已注册
+                device.isRegistered = true;
+                device.lastHeartbeat = System.currentTimeMillis() / 1000;
+            }
         } else if (firstLine.contains("401 Unauthorized")) {
             device.isRegistered = false;
         }

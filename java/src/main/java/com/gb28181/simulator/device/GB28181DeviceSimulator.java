@@ -22,6 +22,16 @@ public class GB28181DeviceSimulator {
     private volatile boolean running = false;
     
     /**
+     * 消息回调接口
+     */
+    @FunctionalInterface
+    public interface MessageCallback {
+        void onMessage(String deviceId, String direction, String message, SocketAddress addr);
+    }
+    
+    private MessageCallback messageCallback = null;
+    
+    /**
      * 创建设备
      */
     public GB28181Device createDevice(String deviceId, String deviceName, String localIp,
@@ -93,9 +103,20 @@ public class GB28181DeviceSimulator {
     }
     
     /**
+     * 设置消息回调
+     */
+    public void setMessageCallback(MessageCallback callback) {
+        this.messageCallback = callback;
+    }
+    
+    /**
      * 打印SIP消息
      */
     public void printSipMessage(String deviceId, String direction, String message, SocketAddress addr) {
+        // 调用消息回调
+        if (messageCallback != null) {
+            messageCallback.onMessage(deviceId, direction, message, addr);
+        }
         String green = "\033[92m";
         String blue = "\033[94m";
         String reset = "\033[0m";
@@ -430,6 +451,30 @@ public class GB28181DeviceSimulator {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+    
+    /**
+     * 停止所有设备
+     */
+    public void stopAllDevices() {
+        running = false;
+        for (GB28181Device device : devices) {
+            device.stopAllStreamPush();
+        }
+    }
+    
+    /**
+     * 获取设备列表
+     */
+    public List<GB28181Device> getDevices() {
+        return new ArrayList<>(devices);
+    }
+    
+    /**
+     * 获取运行状态
+     */
+    public boolean isRunning() {
+        return running;
     }
 }
 
