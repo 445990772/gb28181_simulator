@@ -3,7 +3,7 @@
 // API基础URL配置
 const API_BASE_URLS = {
     python: 'http://localhost:5000/api',
-    java: 'http://localhost:8080/api'
+    java: 'http://localhost:5001/api'
 };
 
 // 从URL获取后端类型（从localStorage或默认）

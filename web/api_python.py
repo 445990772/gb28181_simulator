@@ -428,6 +428,90 @@ def system_resources():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/system/resources/stream', methods=['GET'])
+def system_resources_stream():
+    """SSE流：推送系统资源统计数据"""
+    def generate():
+        last_network_stats = {'bytesSent': 0, 'bytesRecv': 0, 'timestamp': time.time()}
+        
+        while True:
+            try:
+                # CPU使用率
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                cpu_count = psutil.cpu_count()
+                
+                # 内存使用情况
+                memory = psutil.virtual_memory()
+                memory_total = memory.total
+                memory_used = memory.used
+                memory_percent = memory.percent
+                memory_available = memory.available
+                
+                # 网络收发包情况
+                net_io = psutil.net_io_counters()
+                bytes_sent = net_io.bytes_sent
+                bytes_recv = net_io.bytes_recv
+                packets_sent = net_io.packets_sent
+                packets_recv = net_io.packets_recv
+                
+                current_timestamp = time.time()
+                
+                # 计算网络速率
+                time_diff = current_timestamp - last_network_stats['timestamp']
+                sent_rate = 0
+                recv_rate = 0
+                if time_diff > 0:
+                    sent_rate = (bytes_sent - last_network_stats['bytesSent']) / time_diff / 1024  # KB/s
+                    recv_rate = (bytes_recv - last_network_stats['bytesRecv']) / time_diff / 1024  # KB/s
+                
+                last_network_stats = {
+                    'bytesSent': bytes_sent,
+                    'bytesRecv': bytes_recv,
+                    'timestamp': current_timestamp
+                }
+                
+                data = {
+                    'type': 'update',
+                    'cpu': {
+                        'percent': cpu_percent,
+                        'count': cpu_count
+                    },
+                    'memory': {
+                        'total': memory_total,
+                        'used': memory_used,
+                        'available': memory_available,
+                        'percent': memory_percent
+                    },
+                    'network': {
+                        'bytesSent': bytes_sent,
+                        'bytesRecv': bytes_recv,
+                        'packetsSent': packets_sent,
+                        'packetsRecv': packets_recv,
+                        'sentRate': sent_rate,
+                        'recvRate': recv_rate
+                    },
+                    'timestamp': current_timestamp
+                }
+                
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                
+                time.sleep(2)  # 每2秒推送一次
+                
+            except Exception as e:
+                error_data = {'type': 'error', 'message': str(e)}
+                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                break
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
+
 @app.route('/api/device/<device_id>/info', methods=['GET'])
 def device_info(device_id):
     """获取设备详细信息"""

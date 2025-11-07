@@ -46,12 +46,12 @@ public class ApiServer {
         System.out.println("GB28181 设备模拟器 - Java API服务 (Vert.x)");
         System.out.println("=".repeat(60));
         
-        int port = 8080;
+        int port = 5001;
         if (args.length > 0) {
             try {
                 port = Integer.parseInt(args[0]);
             } catch (NumberFormatException e) {
-                System.err.println("无效的端口号，使用默认端口8080");
+                System.err.println("无效的端口号，使用默认端口5001");
             }
         }
         
@@ -87,6 +87,7 @@ public class ApiServer {
         router.get("/api/stats").handler(ApiServer::handleStats);
         router.get("/api/messages").handler(ApiServer::handleMessages);
         router.get("/api/system/resources").handler(ApiServer::handleSystemResources);
+        router.get("/api/system/resources/stream").handler(ApiServer::handleSystemResourcesStream);
         
         // 设备相关API
         router.get("/api/device/:deviceId/info").handler(ApiServer::handleDeviceInfo);
@@ -838,6 +839,138 @@ public class ApiServer {
                 .putHeader("Content-Type", "application/json; charset=UTF-8")
                 .end(error.toString());
         }
+    }
+    
+    /**
+     * 系统资源统计SSE流处理器
+     */
+    private static void handleSystemResourcesStream(RoutingContext ctx) {
+        HttpServerResponse response = ctx.response();
+        
+        // 设置SSE响应头
+        response
+            .setChunked(true)
+            .putHeader("Content-Type", "text/event-stream")
+            .putHeader("Cache-Control", "no-cache")
+            .putHeader("Connection", "keep-alive")
+            .putHeader("X-Accel-Buffering", "no");
+        
+        // 用于存储上次网络统计
+        final long[] lastNetworkStats = {0, 0, System.currentTimeMillis() / 1000};
+        
+        // 使用Vert.x的定时器实现SSE推送
+        long timerId = vertx.setPeriodic(2000, id -> {
+            try {
+                // CPU使用率
+                OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+                double cpuPercent = 0;
+                int cpuCount = osBean.getAvailableProcessors();
+                
+                if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
+                    com.sun.management.OperatingSystemMXBean sunOsBean = 
+                        (com.sun.management.OperatingSystemMXBean) osBean;
+                    cpuPercent = sunOsBean.getProcessCpuLoad() * 100;
+                    if (cpuPercent < 0) {
+                        cpuPercent = 0;
+                    }
+                } else {
+                    cpuPercent = osBean.getSystemLoadAverage() * 100 / cpuCount;
+                    if (cpuPercent < 0 || Double.isNaN(cpuPercent)) {
+                        cpuPercent = 0;
+                    }
+                }
+                
+                // 内存使用情况
+                long memoryTotal = 0;
+                long memoryUsed = 0;
+                long memoryAvailable = 0;
+                double memoryPercent = 0;
+                
+                if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
+                    com.sun.management.OperatingSystemMXBean sunOsBean = 
+                        (com.sun.management.OperatingSystemMXBean) osBean;
+                    memoryTotal = sunOsBean.getTotalPhysicalMemorySize();
+                    memoryUsed = memoryTotal - sunOsBean.getFreePhysicalMemorySize();
+                    memoryAvailable = sunOsBean.getFreePhysicalMemorySize();
+                    memoryPercent = (double) memoryUsed / memoryTotal * 100;
+                } else {
+                    MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
+                    MemoryUsage heapUsage = memoryBean.getHeapMemoryUsage();
+                    memoryTotal = heapUsage.getMax();
+                    memoryUsed = heapUsage.getUsed();
+                    memoryAvailable = memoryTotal - memoryUsed;
+                    memoryPercent = (double) memoryUsed / memoryTotal * 100;
+                }
+                
+                // 网络收发包情况（Java标准库限制，这里返回0）
+                long bytesSent = 0;
+                long bytesRecv = 0;
+                long packetsSent = 0;
+                long packetsRecv = 0;
+                
+                // 计算网络速率
+                long currentTimestamp = System.currentTimeMillis() / 1000;
+                double sentRate = 0;
+                double recvRate = 0;
+                
+                long timeDiff = currentTimestamp - lastNetworkStats[2];
+                if (timeDiff > 0) {
+                    sentRate = (bytesSent - lastNetworkStats[0]) / (double) timeDiff / 1024; // KB/s
+                    recvRate = (bytesRecv - lastNetworkStats[1]) / (double) timeDiff / 1024; // KB/s
+                }
+                
+                lastNetworkStats[0] = bytesSent;
+                lastNetworkStats[1] = bytesRecv;
+                lastNetworkStats[2] = currentTimestamp;
+                
+                // 构建JSON数据
+                Map<String, Object> data = new HashMap<>();
+                data.put("type", "update");
+                
+                Map<String, Object> cpu = new HashMap<>();
+                cpu.put("percent", Math.round(cpuPercent * 100.0) / 100.0);
+                cpu.put("count", cpuCount);
+                data.put("cpu", cpu);
+                
+                Map<String, Object> memory = new HashMap<>();
+                memory.put("total", memoryTotal);
+                memory.put("used", memoryUsed);
+                memory.put("available", memoryAvailable);
+                memory.put("percent", Math.round(memoryPercent * 100.0) / 100.0);
+                data.put("memory", memory);
+                
+                Map<String, Object> network = new HashMap<>();
+                network.put("bytesSent", bytesSent);
+                network.put("bytesRecv", bytesRecv);
+                network.put("packetsSent", packetsSent);
+                network.put("packetsRecv", packetsRecv);
+                network.put("sentRate", sentRate);
+                network.put("recvRate", recvRate);
+                data.put("network", network);
+                
+                data.put("timestamp", currentTimestamp);
+                
+                String jsonData = gson.toJson(data);
+                String sseData = "data: " + jsonData + "\n\n";
+                
+                response.write(sseData);
+                
+            } catch (Exception e) {
+                Map<String, Object> errorData = new HashMap<>();
+                errorData.put("type", "error");
+                errorData.put("message", e.getMessage());
+                String jsonError = gson.toJson(errorData);
+                String sseError = "data: " + jsonError + "\n\n";
+                response.write(sseError);
+                vertx.cancelTimer(id);
+                response.end();
+            }
+        });
+        
+        // 当连接关闭时，取消定时器
+        response.closeHandler(v -> {
+            vertx.cancelTimer(timerId);
+        });
     }
     
     /**

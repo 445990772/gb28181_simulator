@@ -1,7 +1,7 @@
 // API基础URL配置
 const API_BASE_URLS = {
     python: 'http://localhost:5000/api',
-    java: 'http://localhost:8080/api'
+    java: 'http://localhost:5001/api'
 };
 
 let currentBackend = 'python';
@@ -11,9 +11,10 @@ let monitorInterval = null;
 let messageInterval = null;
 let isMonitorPaused = false;
 let deviceCharts = {}; // 存储设备图表的对象
-let systemResourcesInterval = null; // 系统资源轮询
+let systemResourcesInterval = null; // 系统资源轮询（已废弃，改用SSE）
+let systemResourcesEventSource = null; // 系统资源SSE连接
 let systemResourceCharts = {}; // 系统资源图表
-let lastNetworkStats = { bytesSent: 0, bytesRecv: 0 }; // 上次网络统计，用于计算速率
+let lastNetworkStats = { bytesSent: 0, bytesRecv: 0, timestamp: 0 }; // 上次网络统计，用于计算速率
 
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
@@ -745,38 +746,48 @@ function initializeSystemResourceCharts() {
     }
 }
 
-// 开始系统资源轮询
+// 开始系统资源SSE推送
 function startSystemResourcesPolling() {
-    if (systemResourcesInterval) {
-        clearInterval(systemResourcesInterval);
-    }
+    // 先停止旧的连接
+    stopSystemResourcesPolling();
     
-    // 每2秒获取一次系统资源数据
-    systemResourcesInterval = setInterval(async () => {
+    // 建立SSE连接
+    const url = `${API_BASE_URLS[currentBackend]}/system/resources/stream`;
+    systemResourcesEventSource = new EventSource(url);
+    
+    systemResourcesEventSource.onmessage = function(event) {
         try {
-            const response = await fetch(`${API_BASE_URLS[currentBackend]}/system/resources`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
+            const data = JSON.parse(event.data);
+            if (data.type === 'update') {
                 updateSystemResources(data);
+            } else if (data.type === 'error') {
+                console.error('系统资源SSE错误:', data.message);
             }
         } catch (error) {
-            // 静默处理错误
-            console.error('获取系统资源失败:', error);
+            console.error('解析系统资源数据失败:', error);
         }
-    }, 2000);
+    };
+    
+    systemResourcesEventSource.onerror = function(error) {
+        console.error('系统资源SSE连接错误:', error);
+        // 连接断开后，尝试重新连接
+        setTimeout(() => {
+            if (systemResourcesEventSource && systemResourcesEventSource.readyState === EventSource.CLOSED) {
+                startSystemResourcesPolling();
+            }
+        }, 3000);
+    };
 }
 
-// 停止系统资源轮询
+// 停止系统资源SSE推送
 function stopSystemResourcesPolling() {
     if (systemResourcesInterval) {
         clearInterval(systemResourcesInterval);
         systemResourcesInterval = null;
+    }
+    if (systemResourcesEventSource) {
+        systemResourcesEventSource.close();
+        systemResourcesEventSource = null;
     }
 }
 
@@ -839,12 +850,14 @@ function updateSystemResources(data) {
         const bytesSent = data.network.bytesSent || 0;
         const bytesRecv = data.network.bytesRecv || 0;
         
-        // 计算速率（KB/s）
-        const currentTime = data.timestamp || Date.now() / 1000;
-        let sentRate = 0;
-        let recvRate = 0;
+        // 如果SSE已经计算了速率，直接使用；否则自己计算
+        let sentRate = data.network.sentRate || 0;
+        let recvRate = data.network.recvRate || 0;
         
-        if (lastNetworkStats.timestamp) {
+        const currentTime = data.timestamp || Date.now() / 1000;
+        
+        // 如果SSE没有提供速率，则自己计算
+        if (sentRate === 0 && lastNetworkStats.timestamp) {
             const timeDiff = currentTime - lastNetworkStats.timestamp;
             if (timeDiff > 0) {
                 sentRate = (bytesSent - lastNetworkStats.bytesSent) / timeDiff / 1024; // KB/s
