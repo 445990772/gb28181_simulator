@@ -1,13 +1,7 @@
 // 设备详情页JavaScript逻辑
 
 // API基础URL配置
-const API_BASE_URLS = {
-    python: 'http://localhost:5000/api',
-    java: 'http://localhost:5001/api'
-};
-
-// 从URL获取后端类型（从localStorage或默认）
-let currentBackend = localStorage.getItem('backendType') || 'python';
+const API_BASE_URL = 'http://localhost:5000/api';
 let deviceId = null;
 let deviceInfo = null;
 let channels = [];
@@ -31,14 +25,9 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function initializePage() {
-    // 获取设备ID和后端类型
+    // 获取设备ID
     const urlParams = new URLSearchParams(window.location.search);
     deviceId = urlParams.get('deviceId');
-    const backendParam = urlParams.get('backend');
-    if (backendParam) {
-        currentBackend = backendParam;
-        localStorage.setItem('backendType', backendParam);
-    }
     
     if (!deviceId) {
         alert('缺少设备ID参数');
@@ -46,7 +35,7 @@ function initializePage() {
         return;
     }
     
-    console.log('设备ID:', deviceId, '后端:', currentBackend);
+    console.log('设备ID:', deviceId);
 
     // 绑定事件
     document.getElementById('backBtn').addEventListener('click', () => {
@@ -116,7 +105,7 @@ async function loadDeviceInfo() {
             throw new Error('设备ID未指定');
         }
         
-        const url = `${API_BASE_URLS[currentBackend]}/device/${deviceId}/info`;
+        const url = `${API_BASE_URL}/device/${deviceId}/info`;
         console.log('请求设备信息:', url);
         
         const response = await fetch(url, {
@@ -343,7 +332,7 @@ function startSSE() {
     params.append('newOnly', 'true');
     
     // 添加参数告诉后端只发送新消息（不发送历史消息）
-    const url = `${API_BASE_URLS[currentBackend]}/device/${deviceId}/stream?${params.toString()}`;
+    const url = `${API_BASE_URL}/device/${deviceId}/stream?${params.toString()}`;
     
     eventSource = new EventSource(url);
     

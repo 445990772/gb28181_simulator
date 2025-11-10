@@ -63,6 +63,21 @@ header h1 {
     color: #24292f;
 }
 
+.backend-selector .btn {
+    min-width: 140px;
+    padding: 8px 16px;
+    font-size: 14px;
+}
+
+.backend-action-btn {
+    display: none;
+    margin-left: 10px;
+}
+
+.backend-action-btn.show {
+    display: inline-block;
+}
+
 .status-bar {
     padding: 12px 16px;
     background: #fafbfc;
@@ -198,6 +213,19 @@ header h1 {
 
 .btn-secondary:hover {
     background: #f3f4f6;
+    border-color: rgba(27, 31, 36, 0.15);
+}
+
+.btn-warning {
+    background: #d1242f;
+    color: white;
+    border: 1px solid rgba(27, 31, 36, 0.15);
+    padding: 8px 16px;
+    font-size: 14px;
+}
+
+.btn-warning:hover:not(:disabled) {
+    background: #b62324;
     border-color: rgba(27, 31, 36, 0.15);
 }
 

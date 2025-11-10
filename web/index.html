@@ -11,16 +11,13 @@
     <div class="container">
         <header>
             <h1>🎥 GB28181 设备模拟器</h1>
-            <p class="subtitle">Web配置界面 - 支持Python和Java版本</p>
+            <p class="subtitle">Web配置界面</p>
         </header>
 
         <div class="backend-selector">
-            <label>选择后端服务：</label>
-            <select id="backendType">
-                <option value="python">Python版本</option>
-                <option value="java">Java版本</option>
-            </select>
-            <button id="checkBackend" class="btn btn-secondary">检查后端连接</button>
+            <button id="checkBackend" class="btn btn-secondary">检查后端服务</button>
+            <button id="connectBackend" class="btn btn-primary backend-action-btn" disabled>连接后端</button>
+            <button id="disconnectBackend" class="btn btn-warning backend-action-btn" disabled>断开后端连接</button>
         </div>
 
         <div class="status-bar" id="statusBar">

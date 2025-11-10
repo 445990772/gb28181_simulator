@@ -553,6 +553,7 @@ class GB28181DeviceSimulator:
     def __init__(self):
         self.devices = []
         self.running = False
+        self.heartbeat_thread = None
         # 退出清理：确保推流进程被关闭
         atexit.register(self._cleanup_on_exit)
         try:
@@ -1082,6 +1083,24 @@ Content-Length: {content_length}
                 device.socket.close()
             device.stop_stream_push()
     
+    def heartbeat_timer(self):
+        """心跳定时器线程"""
+        while self.running:
+            try:
+                current_time = time.time()
+                for device in self.devices:
+                    # 注册成功后每30秒发送心跳消息
+                    if device.is_registered and device.last_heartbeat is not None:
+                        if (current_time - device.last_heartbeat) >= device.heartbeat_interval:
+                            from heartbeat_handler import send_keepalive
+                            send_keepalive(device, self.print_sip_message)
+                            device.last_heartbeat = current_time
+                time.sleep(5)  # 每5秒检查一次
+            except Exception as e:
+                if self.running:
+                    print(f"心跳定时器错误: {e}")
+                time.sleep(5)
+    
     def start_all_devices(self):
         """启动所有设备"""
         self.running = True
@@ -1094,6 +1113,10 @@ Content-Length: {content_length}
             thread.start()
             threads.append(thread)
             time.sleep(0.5)  # 避免端口冲突
+        
+        # 启动心跳定时器线程
+        self.heartbeat_thread = threading.Thread(target=self.heartbeat_timer, daemon=True)
+        self.heartbeat_thread.start()
         
         print(f"\n✓ 所有设备已启动，按 Ctrl+C 停止")
         

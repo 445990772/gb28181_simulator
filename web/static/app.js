@@ -1,10 +1,5 @@
 // API基础URL配置
-const API_BASE_URLS = {
-    python: 'http://localhost:5000/api',
-    java: 'http://localhost:5001/api'
-};
-
-let currentBackend = 'python';
+const API_BASE_URL = 'http://localhost:5000/api';
 let autoScroll = true;
 let statusCheckInterval = null;
 let monitorInterval = null;
@@ -15,28 +10,181 @@ let systemResourcesInterval = null; // 系统资源轮询（已废弃，改用SS
 let systemResourcesEventSource = null; // 系统资源SSE连接
 let systemResourceCharts = {}; // 系统资源图表
 let lastNetworkStats = { bytesSent: 0, bytesRecv: 0, timestamp: 0 }; // 上次网络统计，用于计算速率
+let isBackendConnected = false; // 是否已连接到后端
+
+// 状态保存和恢复
+function saveState() {
+    try {
+        const state = {
+            isBackendConnected: isBackendConnected,
+            timestamp: Date.now()
+        };
+        localStorage.setItem('gb28181_simulator_state', JSON.stringify(state));
+    } catch (e) {
+        console.error('保存状态失败:', e);
+    }
+}
+
+function restoreState() {
+    try {
+        const stateStr = localStorage.getItem('gb28181_simulator_state');
+        if (stateStr) {
+            const state = JSON.parse(stateStr);
+            // 检查状态是否过期（超过1小时则忽略）
+            if (Date.now() - state.timestamp < 3600000) {
+                return state;
+            }
+        }
+    } catch (e) {
+        console.error('恢复状态失败:', e);
+    }
+    return null;
+}
+
+function clearState() {
+    try {
+        localStorage.removeItem('gb28181_simulator_state');
+    } catch (e) {
+        console.error('清除状态失败:', e);
+    }
+}
 
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
     initializeEventListeners();
     initializeSystemResourceCharts();
-    checkBackendConnection().then(() => {
-        // 检查后端连接成功后，同步后端状态
-        syncBackendStatus();
-        // 开始系统资源监控
-        startSystemResourcesPolling();
-    });
+    
+    // 尝试恢复之前的状态
+    const savedState = restoreState();
+    if (savedState && savedState.isBackendConnected) {
+        addLog('检测到之前的连接状态，正在恢复...', 'info');
+        // 延迟一下，确保UI已初始化
+        setTimeout(() => {
+            restoreBackendConnection();
+        }, 500);
+    } else {
+        addLog('请点击"检查后端服务"按钮检查服务状态', 'info');
+    }
+    
+    // 确保初始状态
+    if (!isBackendConnected) {
+        const statusBar = document.getElementById('statusBar');
+        const statusText = document.getElementById('statusText');
+        if (statusBar) statusBar.className = 'status-bar';
+        if (statusText) statusText.textContent = '未连接';
+    }
 });
 
-function initializeEventListeners() {
-    // 后端选择
-    document.getElementById('backendType').addEventListener('change', function(e) {
-        currentBackend = e.target.value;
-        checkBackendConnection();
-    });
+// 恢复后端连接
+async function restoreBackendConnection() {
+    const statusBar = document.getElementById('statusBar');
+    const statusText = document.getElementById('statusText');
+    const checkBackendBtn = document.getElementById('checkBackend');
+    const connectBtn = document.getElementById('connectBackend');
+    const disconnectBtn = document.getElementById('disconnectBackend');
+    
+    try {
+        // 先检查后端服务是否可用
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(`${API_BASE_URL}/health`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (response.ok) {
+            // 检查模拟器是否在运行
+            const statusResponse = await fetch(`${API_BASE_URL}/status`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (statusResponse.ok) {
+                const statusData = await statusResponse.json();
+                
+                // 恢复连接状态
+                isBackendConnected = true;
+                statusBar.className = 'status-bar connected';
+                statusText.textContent = `✓ 已连接到后端服务`;
+                
+                if (checkBackendBtn) checkBackendBtn.disabled = true;
+                if (connectBtn) {
+                    connectBtn.disabled = true;
+                    connectBtn.classList.remove('show');
+                }
+                if (disconnectBtn) {
+                    disconnectBtn.disabled = false;
+                    disconnectBtn.classList.add('show');
+                }
+                
+                addLog(`✓ 已恢复后端连接`, 'success');
+                
+                // 如果模拟器在运行，恢复UI状态
+                if (statusData.running) {
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    
+                    // 显示监控和消息区域
+                    const monitorSection = document.getElementById('monitorSection');
+                    const messageSection = document.getElementById('messageSection');
+                    if (monitorSection) monitorSection.style.display = 'block';
+                    if (messageSection) messageSection.style.display = 'block';
+                    
+                    // 开始状态轮询
+                    startStatusPolling();
+                    startMonitorPolling();
+                    startMessagePolling();
+                    startSystemResourcesPolling();
+                    
+                    // 显示设备列表
+                    if (statusData.devices && statusData.devices.length > 0) {
+                        displayDeviceList(statusData.devices);
+                    }
+                    
+                    addLog(`✓ 模拟器正在运行，已恢复监控`, 'success');
+                }
+                
+                // 保存状态
+                saveState();
+            } else {
+                throw new Error('无法获取状态');
+            }
+        } else {
+            throw new Error('后端服务不可用');
+        }
+    } catch (error) {
+        // 恢复失败，清除保存的状态
+        clearState();
+        isBackendConnected = false;
+        statusBar.className = 'status-bar';
+        statusText.textContent = '未连接';
+        addLog(`恢复连接失败: ${error.message}，请手动连接`, 'warning');
+    }
+}
 
-    // 检查后端连接
-    document.getElementById('checkBackend').addEventListener('click', checkBackendConnection);
+function initializeEventListeners() {
+    // 检查后端服务（只检查是否存活，不建立连接）
+    document.getElementById('checkBackend').addEventListener('click', checkBackendService);
+    
+    // 连接后端
+    const connectBtn = document.getElementById('connectBackend');
+    if (connectBtn) {
+        connectBtn.addEventListener('click', connectBackend);
+    }
+    
+    // 断开后端连接
+    const disconnectBtn = document.getElementById('disconnectBackend');
+    if (disconnectBtn) {
+        disconnectBtn.addEventListener('click', disconnectBackend);
+    }
 
     // 表单提交
     document.getElementById('configForm').addEventListener('submit', function(e) {
@@ -64,35 +212,202 @@ function initializeEventListeners() {
     });
 }
 
-async function checkBackendConnection() {
+// 检查后端服务（只检查服务是否存活，不建立连接）
+async function checkBackendService() {
     const statusBar = document.getElementById('statusBar');
     const statusText = document.getElementById('statusText');
+    const connectBtn = document.getElementById('connectBackend');
+    
+    addLog(`正在检查后端服务状态...`, 'info');
     
     try {
-        const response = await fetch(`${API_BASE_URLS[currentBackend]}/health`, {
+        // 创建超时控制器
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(`${API_BASE_URL}/health`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json'
-            }
+            },
+            signal: controller.signal
         });
+        
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+            const data = await response.json();
+            statusBar.className = 'status-bar';
+            statusText.textContent = `✓ 后端服务运行正常`;
+            addLog(`后端服务检查成功: ${data.message || 'OK'}`, 'success');
+            addLog('可以点击"连接后端"按钮建立连接', 'info');
+            
+            // 服务可用时，启用连接按钮
+            if (connectBtn) {
+                connectBtn.disabled = false;
+                connectBtn.classList.add('show');
+            }
+        } else {
+            throw new Error('服务不可用');
+        }
+    } catch (error) {
+        statusBar.className = 'status-bar error';
+        statusText.textContent = `✗ 后端服务不可用`;
+            addLog(`后端服务检查失败: ${error.message}`, 'error');
+            addLog(`请确保后端服务正在运行`, 'warning');
+        
+        // 服务不可用时，禁用连接按钮
+        if (connectBtn) {
+            connectBtn.disabled = true;
+            connectBtn.classList.remove('show');
+        }
+    }
+}
+
+// 连接后端（建立连接）
+async function connectBackend() {
+    // 如果已经连接到后端，提示用户先断开
+    if (isBackendConnected) {
+        addLog('⚠ 已连接到后端服务，请先点击"断开后端连接"按钮', 'warning');
+        return;
+    }
+    
+    const statusBar = document.getElementById('statusBar');
+    const statusText = document.getElementById('statusText');
+    const checkBackendBtn = document.getElementById('checkBackend');
+    const connectBtn = document.getElementById('connectBackend');
+    const disconnectBtn = document.getElementById('disconnectBackend');
+    
+    addLog(`正在连接后端服务...`, 'info');
+    
+    // 确保所有旧连接已完全清理
+    stopStatusPolling();
+    stopMonitorPolling();
+    stopMessagePolling();
+    stopSystemResourcesPolling();
+    
+    try {
+        // 创建超时控制器
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(`${API_BASE_URL}/health`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
 
         if (response.ok) {
             const data = await response.json();
             statusBar.className = 'status-bar connected';
-            statusText.textContent = `✓ 已连接到${currentBackend === 'python' ? 'Python' : 'Java'}后端服务`;
+            statusText.textContent = `✓ 已连接到后端服务`;
             addLog(`后端连接成功: ${data.message || 'OK'}`, 'success');
+            
+            // 连接成功后，禁用检查按钮，隐藏连接按钮，启用断开连接按钮
+            isBackendConnected = true;
+            if (checkBackendBtn) checkBackendBtn.disabled = true;
+            if (connectBtn) {
+                connectBtn.disabled = true;
+                connectBtn.classList.remove('show');
+            }
+            if (disconnectBtn) {
+                disconnectBtn.disabled = false;
+                disconnectBtn.classList.add('show');
+            }
+            
+            // 保存状态
+            saveState();
         } else {
             throw new Error('连接失败');
         }
     } catch (error) {
         statusBar.className = 'status-bar error';
-        statusText.textContent = `✗ 无法连接到${currentBackend === 'python' ? 'Python' : 'Java'}后端服务`;
+        statusText.textContent = `✗ 无法连接到后端服务`;
         addLog(`后端连接失败: ${error.message}`, 'error');
-        addLog(`请确保${currentBackend === 'python' ? 'Python' : 'Java'}后端服务正在运行`, 'warning');
+        addLog(`请确保后端服务正在运行`, 'warning');
+        
+        // 连接失败时，保持按钮可用
+        isBackendConnected = false;
+        if (checkBackendBtn) checkBackendBtn.disabled = false;
+        if (connectBtn) {
+            connectBtn.disabled = false;
+            connectBtn.classList.add('show');
+        }
+        if (disconnectBtn) {
+            disconnectBtn.disabled = true;
+            disconnectBtn.classList.remove('show');
+        }
     }
 }
 
+// 断开后端连接
+function disconnectBackend() {
+    // 检查模拟器是否正在运行
+    const stopBtn = document.getElementById('stopBtn');
+    if (!stopBtn.disabled) {
+        addLog('⚠ 请先停止模拟器，然后才能断开后端连接', 'warning');
+        return;
+    }
+    
+    const statusBar = document.getElementById('statusBar');
+    const statusText = document.getElementById('statusText');
+    const checkBackendBtn = document.getElementById('checkBackend');
+    const disconnectBtn = document.getElementById('disconnectBackend');
+    
+    // 完全停止所有轮询和连接
+    stopStatusPolling();
+    stopMonitorPolling();
+    stopMessagePolling();
+    stopSystemResourcesPolling();
+    
+    // 确保所有EventSource连接都已关闭
+    if (systemResourcesEventSource) {
+        try {
+            systemResourcesEventSource.close();
+        } catch (e) {
+            console.error('关闭SSE连接时出错:', e);
+        }
+        systemResourcesEventSource = null;
+    }
+    
+    // 清理所有图表数据
+    clearAllCharts();
+    
+    // 重置连接状态
+    isBackendConnected = false;
+    statusBar.className = 'status-bar';
+    statusText.textContent = '未连接';
+    
+    // 启用检查按钮，隐藏连接和断开按钮
+    if (checkBackendBtn) checkBackendBtn.disabled = false;
+    const connectBtn = document.getElementById('connectBackend');
+    if (connectBtn) {
+        connectBtn.disabled = true;
+        connectBtn.classList.remove('show');
+    }
+    if (disconnectBtn) {
+        disconnectBtn.disabled = true;
+        disconnectBtn.classList.remove('show');
+    }
+    
+    addLog('✓ 已断开后端连接，可以重新连接', 'success');
+    
+    // 清除保存的状态
+    clearState();
+}
+
 async function startSimulator() {
+    // 检查是否已连接到后端
+    if (!isBackendConnected) {
+        addLog('⚠ 请先连接后端服务，然后才能启动模拟器', 'warning');
+        addLog('请先点击"检查后端服务"，然后点击"连接后端"按钮', 'info');
+        return;
+    }
+    
     const formData = {
         serverIp: document.getElementById('serverIp').value,
         serverPort: parseInt(document.getElementById('serverPort').value),
@@ -107,7 +422,7 @@ async function startSimulator() {
     addLog(`配置: ${JSON.stringify(formData, null, 2)}`, 'info');
 
     try {
-        const response = await fetch(`${API_BASE_URLS[currentBackend]}/start`, {
+        const response = await fetch(`${API_BASE_URL}/start`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -138,7 +453,7 @@ async function startSimulator() {
             // 启动后立即获取并刷新设备列表状态
             setTimeout(async () => {
                 try {
-                    const statusResponse = await fetch(`${API_BASE_URLS[currentBackend]}/status`, {
+                    const statusResponse = await fetch(`${API_BASE_URL}/status`, {
                         method: 'GET',
                         headers: {
                             'Content-Type': 'application/json'
@@ -161,6 +476,9 @@ async function startSimulator() {
             startMonitorPolling();
             startMessagePolling();
             startSystemResourcesPolling();
+            
+            // 保存状态
+            saveState();
         } else {
             addLog(`✗ 启动失败: ${data.error || '未知错误'}`, 'error');
         }
@@ -173,7 +491,7 @@ async function stopSimulator() {
     addLog('正在停止模拟器...', 'info');
 
     try {
-        const response = await fetch(`${API_BASE_URLS[currentBackend]}/stop`, {
+        const response = await fetch(`${API_BASE_URL}/stop`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -192,6 +510,12 @@ async function stopSimulator() {
             stopMonitorPolling();
             stopMessagePolling();
             stopSystemResourcesPolling();
+            
+            // 保存状态（模拟器已停止，但后端连接仍然保持）
+            saveState();
+            
+            // 提示可以断开后端连接
+            addLog('提示：模拟器已停止，可以断开后端连接以切换后端版本', 'info');
         } else {
             addLog(`✗ 停止失败: ${data.error || '未知错误'}`, 'error');
         }
@@ -203,7 +527,7 @@ async function stopSimulator() {
 async function syncBackendStatus() {
     // 同步后端状态到前端UI
     try {
-        const response = await fetch(`${API_BASE_URLS[currentBackend]}/status`, {
+        const response = await fetch(`${API_BASE_URL}/status`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json'
@@ -212,6 +536,16 @@ async function syncBackendStatus() {
 
         if (response.ok) {
             const data = await response.json();
+            
+            // 如果后端有响应，说明已连接
+            isBackendConnected = true;
+            const checkBackendBtn = document.getElementById('checkBackend');
+            const disconnectBtn = document.getElementById('disconnectBackend');
+            if (checkBackendBtn) checkBackendBtn.disabled = true;
+            if (disconnectBtn) {
+                disconnectBtn.disabled = false;
+                disconnectBtn.classList.add('show');
+            }
             
             // 根据后端状态更新UI
             if (data.running) {
@@ -252,12 +586,21 @@ async function syncBackendStatus() {
     } catch (error) {
         // 静默处理，不影响页面加载
         console.log('同步后端状态失败:', error);
+        // 如果同步失败，重置连接状态
+        isBackendConnected = false;
+        const checkBackendBtn = document.getElementById('checkBackend');
+        const disconnectBtn = document.getElementById('disconnectBackend');
+        if (checkBackendBtn) checkBackendBtn.disabled = false;
+        if (disconnectBtn) {
+            disconnectBtn.disabled = true;
+            disconnectBtn.classList.remove('show');
+        }
     }
 }
 
 async function getStatus() {
     try {
-        const response = await fetch(`${API_BASE_URLS[currentBackend]}/status`, {
+        const response = await fetch(`${API_BASE_URL}/status`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json'
@@ -299,7 +642,7 @@ function startStatusPolling() {
     // 每5秒检查一次状态
     statusCheckInterval = setInterval(async () => {
         try {
-            const response = await fetch(`${API_BASE_URLS[currentBackend]}/status`, {
+            const response = await fetch(`${API_BASE_URL}/status`, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json'
@@ -358,7 +701,7 @@ function startMonitorPolling() {
         if (isMonitorPaused) return;
         
         try {
-            const response = await fetch(`${API_BASE_URLS[currentBackend]}/stats`, {
+            const response = await fetch(`${API_BASE_URL}/stats`, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json'
@@ -549,7 +892,7 @@ function displayDeviceList(devices) {
         deviceCard.style.cursor = 'pointer';
         deviceCard.addEventListener('click', () => {
             // 跳转到设备详情页
-            window.location.href = `device-detail.html?deviceId=${device.deviceId}&backend=${currentBackend}`;
+            window.location.href = `device-detail.html?deviceId=${device.deviceId}`;
         });
         
         // 确保状态信息正确显示
@@ -748,35 +1091,49 @@ function initializeSystemResourceCharts() {
 
 // 开始系统资源SSE推送
 function startSystemResourcesPolling() {
-    // 先停止旧的连接
+    // 先完全停止旧的连接
     stopSystemResourcesPolling();
     
-    // 建立SSE连接
-    const url = `${API_BASE_URLS[currentBackend]}/system/resources/stream`;
-    systemResourcesEventSource = new EventSource(url);
-    
-    systemResourcesEventSource.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'update') {
-                updateSystemResources(data);
-            } else if (data.type === 'error') {
-                console.error('系统资源SSE错误:', data.message);
-            }
-        } catch (error) {
-            console.error('解析系统资源数据失败:', error);
+    // 等待一小段时间确保旧连接完全关闭
+    setTimeout(() => {
+        // 检查是否仍然连接（可能在等待期间断开了）
+        if (!isBackendConnected) {
+            return;
         }
-    };
-    
-    systemResourcesEventSource.onerror = function(error) {
-        console.error('系统资源SSE连接错误:', error);
-        // 连接断开后，尝试重新连接
-        setTimeout(() => {
-            if (systemResourcesEventSource && systemResourcesEventSource.readyState === EventSource.CLOSED) {
-                startSystemResourcesPolling();
-            }
-        }, 3000);
-    };
+        
+        // 建立SSE连接
+        const url = `${API_BASE_URL}/system/resources/stream`;
+        try {
+            systemResourcesEventSource = new EventSource(url);
+            
+            systemResourcesEventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'update') {
+                        updateSystemResources(data);
+                    } else if (data.type === 'error') {
+                        console.error('系统资源SSE错误:', data.message);
+                    }
+                } catch (error) {
+                    console.error('解析系统资源数据失败:', error);
+                }
+            };
+            
+            systemResourcesEventSource.onerror = function(error) {
+                console.error('系统资源SSE连接错误:', error);
+                // 只有在仍然连接时才尝试重新连接
+                if (isBackendConnected && systemResourcesEventSource && systemResourcesEventSource.readyState === EventSource.CLOSED) {
+                    setTimeout(() => {
+                        if (isBackendConnected) {
+                            startSystemResourcesPolling();
+                        }
+                    }, 3000);
+                }
+            };
+        } catch (error) {
+            console.error('创建系统资源SSE连接失败:', error);
+        }
+    }, 100);
 }
 
 // 停止系统资源SSE推送
@@ -786,8 +1143,16 @@ function stopSystemResourcesPolling() {
         systemResourcesInterval = null;
     }
     if (systemResourcesEventSource) {
-        systemResourcesEventSource.close();
-        systemResourcesEventSource = null;
+        try {
+            // 检查连接状态，确保正确关闭
+            if (systemResourcesEventSource.readyState !== EventSource.CLOSED) {
+                systemResourcesEventSource.close();
+            }
+        } catch (e) {
+            console.error('关闭系统资源SSE连接时出错:', e);
+        } finally {
+            systemResourcesEventSource = null;
+        }
     }
 }
 
